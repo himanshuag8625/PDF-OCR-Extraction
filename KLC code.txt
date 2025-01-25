@@ -1,0 +1,1868 @@
+using System;
+using System.IO;
+using System.Text.RegularExpressions;
+using System.Windows.Forms;
+using System.Drawing;
+using System.Collections.Generic;
+using IronOcr;
+using iText.Kernel.Pdf;
+using iText.Layout;
+using iText.Kernel.Pdf.Canvas.Parser;
+using iText.Kernel.Geom;
+using System.Linq;
+using ClosedXML.Excel;
+
+namespace Tropical_Automation
+{
+    public partial class Form1 : Form
+    {
+        int fieldCount = 0;
+        public Form1()
+        {
+            InitializeComponent();
+            this.WindowState = FormWindowState.Maximized;
+        }
+        private void button1_Click(object sender, EventArgs e)
+        {
+            OpenFileDialog openFileDialog = new OpenFileDialog
+            {
+                Filter = "PDF Files|*.pdf",
+                Title = "Select a PDF File"
+            };
+
+            if (openFileDialog.ShowDialog() == DialogResult.OK)
+            {
+                string filePath = openFileDialog.FileName;
+                UploadFileName.Text = System.IO.Path.GetFileName(filePath);
+                ProcessPdf(filePath);
+            }
+        }
+        private void ProcessPdf(string filePath)
+        {
+            string pdfFileName = System.IO.Path.GetFileName(filePath).ToLower();
+            List<List<string>> extractedData = new List<List<string>>();  // Change to List of List of strings
+
+            // Step 1: Check the format based on file name
+            if (pdfFileName.Contains("aasoney consolidation"))
+            {
+                extractedData = ExtractDataFromPdf(filePath, "Aasoney");
+            }
+            else if (pdfFileName.Contains("grenada freight manifest"))
+            {
+                extractedData = ExtractDataFromPdf(filePath, "Grenada");
+            }
+            else if (pdfFileName.Contains("klc manifest"))
+            {
+                extractedData = ExtractDataFromPdf(filePath, "KLC");
+            }
+            else if (pdfFileName.Contains("laparkan"))
+            {
+                extractedData = ExtractDataFromPdf(filePath, "Laparkan");
+            }
+
+            // Display extracted data
+            DisplayExtractedData(extractedData);
+        }
+
+        private List<List<string>> ExtractDataFromPdf(string filePath, string format)
+        {
+            List<List<string>> extractedData = new List<List<string>>();  // Change to List of List of strings
+
+            using (PdfReader reader = new PdfReader(filePath))
+            {
+                using (PdfDocument pdfDocument = new PdfDocument(reader))
+                {
+                    int numberOfPages = pdfDocument.GetNumberOfPages();
+
+                    for (int i = 1; i <= numberOfPages; i++)
+                    {
+                        // Step 2: Extract text from each page using iText7
+                        string pageText = PdfTextExtractor.GetTextFromPage(pdfDocument.GetPage(i));
+
+                        // Step 3: Extract specific fields based on format
+                        switch (format)
+                        {
+                            case "Aasoney":
+                                extractedData.AddRange(ExtractFieldsForAasoney(pageText, i));
+                                break;
+
+                            case "Grenada":
+                                extractedData.AddRange(ExtractFieldsForGrenada(pageText, i));
+                                break;
+
+                            case "KLC":
+                                extractedData.AddRange(ExtractFieldsForKLC(pageText, i));
+                                break;
+
+                            case "Laparkan":
+                                extractedData.AddRange(ExtractFieldsForLaparkan(pageText, i));
+                                break;
+                        }
+                    }
+                }
+            }
+
+            return extractedData;
+        }
+        private List<List<string>> ExtractFieldsForAasoney(string text, int pageNo)
+        {
+            List<List<string>> rows = new List<List<string>>();
+            List<string> fields = new List<string>();
+
+            // Variables to hold parsed data for a single row
+            string blNumber = "", consignee = "", shipper = "", pcs = "";
+            string cargoType = "", description = "", weightLbs = "";
+            string weightKgs = "", volume = "", freightValue = "";
+            int telCount = 0;
+
+            // Split the input text into lines
+            string[] lines = text.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+
+            for (int i = 0; i < lines.Length; i++)
+            {
+                var line = lines[i];
+
+                // Increment telCount when "Tel:" is found
+                if (line.ToLower().Contains("tel:") || line.ToLower().Contains("tel"))
+                {
+                    if (i == lines.Count() - 1)
+                    {
+                        line = lines[i];
+
+                        // Increment telCount when "Tel:" is found
+                        if ((line.ToLower().Contains("tel:") || line.ToLower().Contains("tel")) && !string.IsNullOrEmpty(blNumber))
+                        {
+                            telCount += 2; // Increment telCount by 2 when "Tel:" or "tel" is found
+                        }
+                    }
+
+                    var nameParts = Regex.Split(line, @"\s+");
+                    if (nameParts.Length >= 1)
+                    {
+                        int telOccurrences = 0;
+
+                        for (int j = 0; j < nameParts.Length; j++)
+                        {
+                            if (nameParts[j].ToLower().Contains("tel:") || nameParts[j].ToLower().Contains("tel"))
+                            {
+                                telOccurrences++; // Count occurrences of "tel" or "tel:"
+                            }
+                        }
+
+                        // Optional: Log or handle cases where there are multiple occurrences of "tel"
+                        if (telOccurrences > 1)
+                        {
+                            telCount += 2;
+                        }
+                        else
+                        {
+                            telCount++;
+                            if (telCount < 2) continue;
+                        }
+                    }
+                }
+                else
+                {
+                    if (!string.IsNullOrEmpty(blNumber))
+                    {
+                        var namesLine = lines[i].Trim();
+                        var namePattern = @"^[A-Za-z]+(?:-[A-Za-z]+)?(\s[A-Za-z]+(?:-[A-Za-z]+)?)+$";
+
+                        namesLine = lines[i].Trim();
+                        if (Regex.IsMatch(namesLine, namePattern))
+                        {
+                            telCount += 2;
+                            i--;
+                        }
+                    }
+                }
+
+                if (telCount >= 2)
+                {
+                    telCount++; // Reset processing for next row
+                }
+
+                if (pageNo == 1 && fieldCount == 0 && telCount < 2)
+                {
+                    // Skip unnecessary lines and extract key data
+                    if (blNumber == "" && line.Contains("FREIGHT VALUE"))
+                    {
+                        var namesLine = lines[i].Trim();
+                        while (namesLine.Contains("Sir") || namesLine.Contains("Given") || namesLine.Contains("FREIGHT VALUE"))
+                        {
+                            i++;
+                            namesLine = lines[i].Trim();
+                        }
+
+                        namesLine = lines[i].Trim();
+                        var namePattern = @"^[A-Za-z]+(?:-[A-Za-z]+)?(\s[A-Za-z]+(?:-[A-Za-z]+)?)+$";
+
+                        if (i < lines.Length)
+                        {
+                            while (i < lines.Length)
+                            {
+                                namesLine = lines[i].Trim();
+                                if (Regex.IsMatch(namesLine, namePattern))
+                                {
+                                    namesLine = lines[i].Trim();
+                                    var nameParts = Regex.Split(namesLine, @"\s+");
+                                    if (nameParts.Length >= 4)
+                                    {
+                                        consignee = $"{nameParts[0]} {nameParts[1]}";
+                                        shipper = $"{nameParts[2]} {nameParts[3]}";
+                                    }
+                                    else if (nameParts.Length >= 4)
+                                    {
+                                        // First two words are consignee, last two are shipper
+                                        consignee = $"{nameParts[0]} {nameParts[1]}";
+                                        shipper = $"{nameParts[nameParts.Length - 2]} {nameParts[nameParts.Length - 1]}";
+                                    }
+                                    else if (nameParts.Length == 3)
+                                    {
+                                        // First two words are consignee, last one is shipper
+                                        consignee = $"{nameParts[0]} {nameParts[1]}";
+                                        shipper = $"{nameParts[2]}";
+                                    }
+                                    else if (nameParts.Length == 2)
+                                    {
+                                        // Both words go to consignee, no shipper
+                                        consignee = $"{nameParts[0]}";
+                                        shipper = $"{nameParts[1]}";
+                                    }
+                                    else
+                                    {
+                                        // For unexpected cases, assign all to consignee
+                                        consignee = namesLine;
+                                        shipper = string.Empty;
+                                    }
+                                    break;
+                                }
+                                i++;
+                            }
+                        }
+                        i++;
+
+                        if (i < lines.Length && consignee != "")
+                        {
+                            var cargoDescriptionLine = lines[i].Trim();
+                            var cargoDescriptionParts = cargoDescriptionLine.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+
+                            if (cargoDescriptionParts.Length >= 2)
+                            {
+                                cargoType = cargoDescriptionParts[0];
+                            }
+                            if (cargoType == "")
+                            {
+                                while (i < lines.Length)
+                                {
+                                    cargoDescriptionLine = lines[i].Trim();
+                                    cargoDescriptionParts = cargoDescriptionLine.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+
+                                    if (cargoDescriptionParts.Length >= 2)
+                                    {
+                                        cargoType = cargoDescriptionParts[0];
+                                        break;
+                                    }
+                                    i++;
+                                }
+                            }
+                            var addressPattern1 = @"^\d+\s[A-Za-z]+\s[A-Za-z]+$";
+                            var addressPattern2 = @"^\d+\s[A-Za-z]+$";
+
+                            while (i < lines.Length)
+                            {
+                                cargoDescriptionLine = lines[i].Trim();
+                                if (Regex.IsMatch(cargoDescriptionLine, addressPattern1)) break;
+                                else if (Regex.IsMatch(cargoDescriptionLine, addressPattern2)) break;
+                                else if (cargoDescriptionLine.Contains("$") && consignee != "") break;
+
+                                if (!string.IsNullOrEmpty(description)) description += ", ";
+                                description += cargoDescriptionLine;
+                                i++;
+                            }
+                        }
+
+                        while (i < lines.Length)
+                        {
+                            line = lines[i].Trim();
+                            if (line.Contains("$") && consignee != "")
+                            {
+                                var lineParts = line.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                                if (lineParts.Length == 7)
+                                {
+                                    blNumber = lineParts[0];
+                                    pcs = lineParts[2];
+                                    weightLbs = lineParts[3];
+                                    weightKgs = lineParts[4];
+                                    volume = lineParts[5];
+                                    freightValue = lineParts[6];
+                                }
+                                else if (lineParts.Length == 6)
+                                {
+                                    blNumber = lineParts[0];
+                                    pcs = lineParts[1];
+                                    weightLbs = lineParts[2];
+                                    weightKgs = lineParts[3];
+                                    volume = lineParts[4];
+                                    freightValue = lineParts[5];
+                                }
+                                else if (lineParts.Length == 8)
+                                {
+                                    blNumber = lineParts[0];
+                                    pcs = lineParts[3];
+                                    weightLbs = lineParts[4];
+                                    weightKgs = lineParts[5];
+                                    volume = lineParts[6];
+                                    freightValue = lineParts[7];
+                                }
+                                else if (lineParts.Length == 9)
+                                {
+                                    blNumber = lineParts[0];
+                                    pcs = lineParts[4];
+                                    weightLbs = lineParts[5];
+                                    weightKgs = lineParts[6];
+                                    volume = lineParts[7];
+                                    freightValue = lineParts[8];
+                                }
+                                else if (lineParts.Length == 5)
+                                {
+                                    blNumber = lineParts[0];
+                                    pcs = lineParts[1];
+                                    weightLbs = lineParts[2];
+                                    weightKgs = lineParts[3];
+                                    volume = lineParts[4];
+                                    freightValue = lineParts[5];
+                                }
+                                break;
+                            }
+                            i++;
+                        }
+                    }
+                }
+
+                else if (pageNo >= 1 && fieldCount >= 0)
+                {
+                    
+                    if (blNumber == "")
+                    {
+                        var namesLine = lines[i].Trim();
+                        var namePattern = @"^[A-Za-z]+(?:-[A-Za-z]+)?(\s[A-Za-z]+(?:-[A-Za-z]+)?)+$";
+
+                        if (i < lines.Length)
+                        {
+                            while (i < lines.Length)
+                            {
+                                namesLine = lines[i].Trim();
+                                if (Regex.IsMatch(namesLine, namePattern))
+                                {
+                                    namesLine = lines[i].Trim();
+                                    var nameParts = Regex.Split(namesLine, @"\s+");
+                                    if (nameParts.Length >= 4)
+                                    {
+                                        consignee = $"{nameParts[0]} {nameParts[1]}";
+                                        shipper = $"{nameParts[2]} {nameParts[3]}";
+                                    }
+                                    else if (nameParts.Length >= 4)
+                                    {
+                                        // First two words are consignee, last two are shipper
+                                        consignee = $"{nameParts[0]} {nameParts[1]}";
+                                        shipper = $"{nameParts[nameParts.Length - 2]} {nameParts[nameParts.Length - 1]}";
+                                    }
+                                    else if (nameParts.Length == 3)
+                                    {
+                                        // First two words are consignee, last one is shipper
+                                        consignee = $"{nameParts[0]} {nameParts[1]}";
+                                        shipper = $"{nameParts[2]}";
+                                    }
+                                    else if (nameParts.Length == 2)
+                                    {
+                                        // Both words go to consignee, no shipper
+                                        consignee = $"{nameParts[0]}";
+                                        shipper = $"{nameParts[1]}";
+                                    }
+                                    else
+                                    {
+                                        // For unexpected cases, assign all to consignee
+                                        consignee = namesLine;
+                                        shipper = string.Empty;
+                                    }
+                                    break;
+                                }
+                                i++;
+                            }
+                        }
+
+                        i++;
+                        if (i < lines.Length && consignee != "")
+                        {
+                            var cargoDescriptionLine = lines[i].Trim();
+                            var cargoDescriptionParts = cargoDescriptionLine.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+
+                            if (cargoDescriptionParts.Length >= 2)
+                            {
+                                cargoType = cargoDescriptionParts[0];
+                            }
+                            if (cargoType == "")
+                            {
+                                while (i < lines.Length)
+                                {
+                                    cargoDescriptionLine = lines[i].Trim();
+                                    cargoDescriptionParts = cargoDescriptionLine.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+
+                                    if (cargoDescriptionParts.Length >= 2)
+                                    {
+                                        cargoType = cargoDescriptionParts[0];
+                                        break;
+                                    }
+                                    i++;
+                                }
+                            }
+                            var addressPattern1 = @"^\d+\s[A-Za-z]+\s[A-Za-z]+$";
+                            var addressPattern2 = @"^\d+\s[A-Za-z]+$";
+
+                            while (i < lines.Length)
+                            {
+                                cargoDescriptionLine = lines[i].Trim();
+                                if (Regex.IsMatch(cargoDescriptionLine, addressPattern1)) break;
+                                else if (Regex.IsMatch(cargoDescriptionLine, addressPattern2)) break;
+                                else if (cargoDescriptionLine.Contains("$") && consignee != "") break;
+
+                                if (!string.IsNullOrEmpty(description)) description += ", ";
+                                description += cargoDescriptionLine;
+                                i++;
+                            }
+                        }
+
+                        while (i < lines.Length)
+                        {
+                            line = lines[i].Trim();
+                            if (line.Contains("$") && consignee != "")
+                            {
+                                var lineParts = line.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                                if (lineParts.Length == 7)
+                                {
+                                    blNumber = lineParts[0];
+                                    pcs = lineParts[2];
+                                    weightLbs = lineParts[3];
+                                    weightKgs = lineParts[4];
+                                    volume = lineParts[5];
+                                    freightValue = lineParts[6];
+                                }
+                                else if (lineParts.Length == 6)
+                                {
+                                    blNumber = lineParts[0];
+                                    pcs = lineParts[1];
+                                    weightLbs = lineParts[2];
+                                    weightKgs = lineParts[3];
+                                    volume = lineParts[4];
+                                    freightValue = lineParts[5];
+                                }
+                                else if (lineParts.Length == 8)
+                                {
+                                    blNumber = lineParts[0];
+                                    pcs = lineParts[3];
+                                    weightLbs = lineParts[4];
+                                    weightKgs = lineParts[5];
+                                    volume = lineParts[6];
+                                    freightValue = lineParts[7];
+                                }
+                                else if (lineParts.Length == 9)
+                                {
+                                    blNumber = lineParts[0];
+                                    pcs = lineParts[4];
+                                    weightLbs = lineParts[5];
+                                    weightKgs = lineParts[6];
+                                    volume = lineParts[7];
+                                    freightValue = lineParts[8];
+                                }
+                                else if (lineParts.Length == 5)
+                                {
+                                    blNumber = lineParts[0];
+                                    pcs = lineParts[1];
+                                    weightLbs = lineParts[2];
+                                    weightKgs = lineParts[3];
+                                    volume = lineParts[4];
+                                    freightValue = lineParts[5];
+                                }
+                                break;
+                            }
+                            i++;
+                        }
+                    }
+                }
+
+                // Add data to rows if all fields are populated
+                if (telCount >= 2)
+                {
+                    fields.Add(blNumber);
+                    fields.Add(consignee);
+                    fields.Add(shipper);
+                    fields.Add(pcs);
+                    fields.Add(cargoType);
+                    fields.Add(description);
+                    fields.Add(weightLbs);
+                    fields.Add(weightKgs);
+                    fields.Add(volume);
+                    fields.Add(freightValue);
+
+                    rows.Add(new List<string>(fields));
+                    fields.Clear();
+                    // Reset variables for the next row
+                    telCount = 0;
+                    fieldCount++;
+                    blNumber = ""; consignee = ""; shipper = ""; pcs = "";
+                    cargoType = ""; description = ""; weightLbs = ""; weightKgs = ""; volume = ""; freightValue = "";
+                }
+            }
+            
+            return rows;
+        }
+        private List<List<string>> ExtractFieldsForGrenada(string text, int pageNo)
+        {
+            List<List<string>> rows = new List<List<string>>();
+            List<string> fields = new List<string>();
+
+            // Variables to hold parsed data for a single row
+            string blNumber = "", consignee = "", shipper = "", pcs = "";
+            string cargoType = "", description = "", weightLbs = "";
+            string weightKgs = "", volume = "", freightValue = "";
+            int telCount = 0;
+
+            // Split the input text into lines
+            string[] lines = text.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+
+            for (int i = 0; i < lines.Length; i++)
+            {
+                var line = lines[i];
+
+                // Increment telCount when "Tel:" is found
+                if (line.ToLower().Contains("tel:") || line.ToLower().Contains("tel"))
+                {
+                    if (i == lines.Count() - 1)
+                    {
+                        line = lines[i];
+
+                        // Increment telCount when "Tel:" is found
+                        if ((line.ToLower().Contains("tel:") || line.ToLower().Contains("tel")) && !string.IsNullOrEmpty(blNumber))
+                        {
+                            telCount += 2; // Increment telCount by 2 when "Tel:" or "tel" is found
+                        }
+                    }
+
+                    var nameParts = Regex.Split(line, @"\s+");
+                    if (nameParts.Length >= 1)
+                    {
+                        int telOccurrences = 0;
+
+                        for (int j = 0; j < nameParts.Length; j++)
+                        {
+                            if (nameParts[j].ToLower().Contains("tel:") || nameParts[j].ToLower().Contains("tel"))
+                            {
+                                telOccurrences++; // Count occurrences of "tel" or "tel:"
+                            }
+                        }
+
+                        // Optional: Log or handle cases where there are multiple occurrences of "tel"
+                        if (telOccurrences > 1)
+                        {
+                            telCount += 2;
+                        }
+                        else
+                        {
+                            telCount++;
+                            if (telCount < 2) continue;
+                        }
+                    }
+                }
+                else
+                {
+                    if (!string.IsNullOrEmpty(blNumber))
+                    {
+                        var namesLine = lines[i].Trim();
+                        var namePattern = @"^[A-Za-z]+(?:-[A-Za-z]+)?(\s[A-Za-z]+(?:-[A-Za-z]+)?)+$";
+
+                        namesLine = lines[i].Trim();
+                        if (Regex.IsMatch(namesLine, namePattern))
+                        {
+                            telCount += 2;
+                            i--;
+                        }
+                    }
+                }
+
+                if (telCount >= 2)
+                {
+                    telCount++; // Reset processing for next row
+                }
+
+                if (pageNo == 1 && fieldCount == 0 && telCount < 2)
+                {
+                    // Skip unnecessary lines and extract key data
+                    if (blNumber == "" && line.Contains("FREIGHT VALUE"))
+                    {
+                        var namesLine = lines[i].Trim();
+                        while (namesLine.Contains("Sir") || namesLine.Contains("Given") || namesLine.Contains("FREIGHT VALUE"))
+                        {
+                            i++;
+                            namesLine = lines[i].Trim();
+                        }
+
+                        namesLine = lines[i].Trim();
+                        var namePattern = @"^[A-Za-z]+(?:-[A-Za-z]+)?(\s[A-Za-z]+(?:-[A-Za-z]+)?)+$";
+
+                        if (i < lines.Length)
+                        {
+                            while (i < lines.Length)
+                            {
+                                namesLine = lines[i].Trim();
+                                if (Regex.IsMatch(namesLine, namePattern))
+                                {
+                                    namesLine = lines[i].Trim();
+                                    var nameParts = Regex.Split(namesLine, @"\s+");
+                                    if (nameParts.Length >= 4)
+                                    {
+                                        consignee = $"{nameParts[0]} {nameParts[1]}";
+                                        shipper = $"{nameParts[2]} {nameParts[3]}";
+                                    }
+                                    else if (nameParts.Length >= 4)
+                                    {
+                                        // First two words are consignee, last two are shipper
+                                        consignee = $"{nameParts[0]} {nameParts[1]}";
+                                        shipper = $"{nameParts[nameParts.Length - 2]} {nameParts[nameParts.Length - 1]}";
+                                    }
+                                    else if (nameParts.Length == 3)
+                                    {
+                                        // First two words are consignee, last one is shipper
+                                        consignee = $"{nameParts[0]} {nameParts[1]}";
+                                        shipper = $"{nameParts[2]}";
+                                    }
+                                    else if (nameParts.Length == 2)
+                                    {
+                                        // Both words go to consignee, no shipper
+                                        consignee = $"{nameParts[0]}";
+                                        shipper = $"{nameParts[1]}";
+                                    }
+                                    else
+                                    {
+                                        // For unexpected cases, assign all to consignee
+                                        consignee = namesLine;
+                                        shipper = string.Empty;
+                                    }
+                                    break;
+                                }
+                                i++;
+                            }
+                        }
+                        i++;
+
+                        if (i < lines.Length && consignee != "")
+                        {
+                            var cargoDescriptionLine = lines[i].Trim();
+                            var cargoDescriptionParts = cargoDescriptionLine.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+
+                            if (cargoDescriptionParts.Length >= 2)
+                            {
+                                cargoType = cargoDescriptionParts[0];
+                            }
+                            if (cargoType == "")
+                            {
+                                while (i < lines.Length)
+                                {
+                                    cargoDescriptionLine = lines[i].Trim();
+                                    cargoDescriptionParts = cargoDescriptionLine.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+
+                                    if (cargoDescriptionParts.Length >= 2)
+                                    {
+                                        cargoType = cargoDescriptionParts[0];
+                                        break;
+                                    }
+                                    i++;
+                                }
+                            }
+                            var addressPattern1 = @"^\d+\s[A-Za-z]+\s[A-Za-z]+$";
+                            var addressPattern2 = @"^\d+\s[A-Za-z]+$";
+
+                            while (i < lines.Length)
+                            {
+                                cargoDescriptionLine = lines[i].Trim();
+                                if (Regex.IsMatch(cargoDescriptionLine, addressPattern1)) break;
+                                else if (Regex.IsMatch(cargoDescriptionLine, addressPattern2)) break;
+                                else if (cargoDescriptionLine.Contains("$") && consignee != "") break;
+
+                                if (!string.IsNullOrEmpty(description)) description += ", ";
+                                description += cargoDescriptionLine;
+                                i++;
+                            }
+                        }
+
+                        while (i < lines.Length)
+                        {
+                            line = lines[i].Trim();
+                            if (line.Contains("$") && consignee != "")
+                            {
+                                var lineParts = line.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                                if (lineParts.Length == 7)
+                                {
+                                    blNumber = lineParts[0];
+                                    pcs = lineParts[2];
+                                    weightLbs = lineParts[3];
+                                    weightKgs = lineParts[4];
+                                    volume = lineParts[5];
+                                    freightValue = lineParts[6];
+                                }
+                                else if (lineParts.Length == 6)
+                                {
+                                    blNumber = lineParts[0];
+                                    pcs = lineParts[1];
+                                    weightLbs = lineParts[2];
+                                    weightKgs = lineParts[3];
+                                    volume = lineParts[4];
+                                    freightValue = lineParts[5];
+                                }
+                                else if (lineParts.Length == 8)
+                                {
+                                    blNumber = lineParts[0];
+                                    pcs = lineParts[3];
+                                    weightLbs = lineParts[4];
+                                    weightKgs = lineParts[5];
+                                    volume = lineParts[6];
+                                    freightValue = lineParts[7];
+                                }
+                                else if (lineParts.Length == 9)
+                                {
+                                    blNumber = lineParts[0];
+                                    pcs = lineParts[4];
+                                    weightLbs = lineParts[5];
+                                    weightKgs = lineParts[6];
+                                    volume = lineParts[7];
+                                    freightValue = lineParts[8];
+                                }
+                                else if (lineParts.Length == 5)
+                                {
+                                    blNumber = lineParts[0];
+                                    pcs = lineParts[1];
+                                    weightLbs = lineParts[2];
+                                    weightKgs = lineParts[3];
+                                    volume = lineParts[4];
+                                    freightValue = lineParts[5];
+                                }
+                                break;
+                            }
+                            i++;
+                        }
+                    }
+                }
+
+                else if (pageNo >= 1 && fieldCount >= 0)
+                {
+
+                    if (blNumber == "")
+                    {
+                        var namesLine = lines[i].Trim();
+                        var namePattern = @"^[A-Za-z]+(?:-[A-Za-z]+)?(\s[A-Za-z]+(?:-[A-Za-z]+)?)+$";
+
+                        if (i < lines.Length)
+                        {
+                            while (i < lines.Length)
+                            {
+                                namesLine = lines[i].Trim();
+                                if (Regex.IsMatch(namesLine, namePattern))
+                                {
+                                    namesLine = lines[i].Trim();
+                                    var nameParts = Regex.Split(namesLine, @"\s+");
+                                    if (nameParts.Length >= 4)
+                                    {
+                                        consignee = $"{nameParts[0]} {nameParts[1]}";
+                                        shipper = $"{nameParts[2]} {nameParts[3]}";
+                                    }
+                                    else if (nameParts.Length >= 4)
+                                    {
+                                        // First two words are consignee, last two are shipper
+                                        consignee = $"{nameParts[0]} {nameParts[1]}";
+                                        shipper = $"{nameParts[nameParts.Length - 2]} {nameParts[nameParts.Length - 1]}";
+                                    }
+                                    else if (nameParts.Length == 3)
+                                    {
+                                        // First two words are consignee, last one is shipper
+                                        consignee = $"{nameParts[0]} {nameParts[1]}";
+                                        shipper = $"{nameParts[2]}";
+                                    }
+                                    else if (nameParts.Length == 2)
+                                    {
+                                        // Both words go to consignee, no shipper
+                                        consignee = $"{nameParts[0]}";
+                                        shipper = $"{nameParts[1]}";
+                                    }
+                                    else
+                                    {
+                                        // For unexpected cases, assign all to consignee
+                                        consignee = namesLine;
+                                        shipper = string.Empty;
+                                    }
+                                    break;
+                                }
+                                i++;
+                            }
+                        }
+
+                        i++;
+                        if (i < lines.Length && consignee != "")
+                        {
+                            var cargoDescriptionLine = lines[i].Trim();
+                            var cargoDescriptionParts = cargoDescriptionLine.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+
+                            if (cargoDescriptionParts.Length >= 2)
+                            {
+                                cargoType = cargoDescriptionParts[0];
+                            }
+                            if (cargoType == "")
+                            {
+                                while (i < lines.Length)
+                                {
+                                    cargoDescriptionLine = lines[i].Trim();
+                                    cargoDescriptionParts = cargoDescriptionLine.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+
+                                    if (cargoDescriptionParts.Length >= 2)
+                                    {
+                                        cargoType = cargoDescriptionParts[0];
+                                        break;
+                                    }
+                                    i++;
+                                }
+                            }
+                            var addressPattern1 = @"^\d+\s[A-Za-z]+\s[A-Za-z]+$";
+                            var addressPattern2 = @"^\d+\s[A-Za-z]+$";
+
+                            while (i < lines.Length)
+                            {
+                                cargoDescriptionLine = lines[i].Trim();
+                                if (Regex.IsMatch(cargoDescriptionLine, addressPattern1)) break;
+                                else if (Regex.IsMatch(cargoDescriptionLine, addressPattern2)) break;
+                                else if (cargoDescriptionLine.Contains("$") && consignee != "") break;
+
+                                if (!string.IsNullOrEmpty(description)) description += ", ";
+                                description += cargoDescriptionLine;
+                                i++;
+                            }
+                        }
+
+                        while (i < lines.Length)
+                        {
+                            line = lines[i].Trim();
+                            if (line.Contains("$") && consignee != "")
+                            {
+                                var lineParts = line.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                                if (lineParts.Length == 7)
+                                {
+                                    blNumber = lineParts[0];
+                                    pcs = lineParts[2];
+                                    weightLbs = lineParts[3];
+                                    weightKgs = lineParts[4];
+                                    volume = lineParts[5];
+                                    freightValue = lineParts[6];
+                                }
+                                else if (lineParts.Length == 6)
+                                {
+                                    blNumber = lineParts[0];
+                                    pcs = lineParts[1];
+                                    weightLbs = lineParts[2];
+                                    weightKgs = lineParts[3];
+                                    volume = lineParts[4];
+                                    freightValue = lineParts[5];
+                                }
+                                else if (lineParts.Length == 8)
+                                {
+                                    blNumber = lineParts[0];
+                                    pcs = lineParts[3];
+                                    weightLbs = lineParts[4];
+                                    weightKgs = lineParts[5];
+                                    volume = lineParts[6];
+                                    freightValue = lineParts[7];
+                                }
+                                else if (lineParts.Length == 9)
+                                {
+                                    blNumber = lineParts[0];
+                                    pcs = lineParts[4];
+                                    weightLbs = lineParts[5];
+                                    weightKgs = lineParts[6];
+                                    volume = lineParts[7];
+                                    freightValue = lineParts[8];
+                                }
+                                else if (lineParts.Length == 5)
+                                {
+                                    blNumber = lineParts[0];
+                                    pcs = lineParts[1];
+                                    weightLbs = lineParts[2];
+                                    weightKgs = lineParts[3];
+                                    volume = lineParts[4];
+                                    freightValue = lineParts[5];
+                                }
+                                break;
+                            }
+                            i++;
+                        }
+                    }
+                }
+
+                // Add data to rows if all fields are populated
+                if (telCount >= 2)
+                {
+                    fields.Add(blNumber);
+                    fields.Add(consignee);
+                    fields.Add(shipper);
+                    fields.Add(pcs);
+                    fields.Add(cargoType);
+                    fields.Add(description);
+                    fields.Add(weightLbs);
+                    fields.Add(weightKgs);
+                    fields.Add(volume);
+                    fields.Add(freightValue);
+
+                    rows.Add(new List<string>(fields));
+                    fields.Clear();
+                    // Reset variables for the next row
+                    telCount = 0;
+                    fieldCount++;
+                    blNumber = ""; consignee = ""; shipper = ""; pcs = "";
+                    cargoType = ""; description = ""; weightLbs = ""; weightKgs = ""; volume = ""; freightValue = "";
+                }
+            }
+
+            return rows;
+        }
+        private List<List<string>> ExtractFieldsForKLC(string text, int pageNo)
+        {
+            List<List<string>> rows = new List<List<string>>();
+            List<string> fields = new List<string>();
+
+            string blNumber = "", consignee = "", shipper = "", pcs = "";
+            string cargoType = "", description = "", weightLbs = "";
+            string weightKgs = "", volume = "", freightValue = "";
+            int telCount = 0;
+
+            // Split the input text into lines
+            string[] lines = text.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+
+            for (int i = 0; i < lines.Length; i++)
+            {
+                var line = lines[i];
+
+                if (pageNo >= 1 && fieldCount >= 0)
+                {
+                    // Skip unnecessary lines and extract key data
+                    if (blNumber == "" && line.ToLower().Contains("wt cft"))
+                    {
+                        var namesLine = lines[i].Trim();
+                        var previousLine = "";
+                        while (namesLine.ToLower().Contains("wt cft"))
+                        {
+                            i++;
+                            namesLine = lines[i].Trim();
+                        }
+
+                        namesLine = lines[i].Trim();
+                        //var namePattern = @"^\d+\s[A-Za-z]+(?:\s[A-Za-z]+)*(?:\s[A-Za-z]+\s[A-Za-z]+)?(?:\s[A-Za-z]+\s[A-Za-z]+)?(?:\s(?:[A-Za-z0-9.,]+))*\s\d+$";
+                        var namePattern = "";
+
+                        if(Regex.IsMatch(namesLine, @"^\d+\s[A-Za-z]+(?:[\s-][A-Za-z]+)*(?:\sADDR\s\d+\s(?:[A-Za-z0-9.,]+\s?)+)\s\d+\s\d+$"))
+                        {
+                            namePattern = @"^\d+\s[A-Za-z]+(?:[\s-][A-Za-z]+)*(?:\sADDR\s\d+\s(?:[A-Za-z0-9.,]+\s?)+)\s\d+\s\d+$";
+                        }
+                        else if (Regex.IsMatch(namesLine, @"^\d+\s+[A-Za-z]+(?:\s+[A-Za-z]+)*(?:\s+ADDR\s+\d+\s+(?:[A-Za-z0-9.,\s]+))\s+\d+\s+\d+$"))
+                        {
+                            namePattern = @"^\d+\s+[A-Za-z]+(?:\s+[A-Za-z]+)*(?:\s+ADDR\s+\d+\s+(?:[A-Za-z0-9.,\s]+))\s+\d+\s+\d+$";
+                        }
+
+                        if (i < lines.Length)
+                        {
+                            while (i < lines.Length)
+                            {
+                                namesLine = lines[i].Trim();
+                                //var repeatCFTPattern = @" ^ (.*)\s\d+\s\d+$";
+                                var repeatCFTPattern = "";
+
+                                //if (Regex.IsMatch(namesLine, @"^\d+\s.*\s\d+\s\d+$"))
+                                //{
+                                //    if (!Regex.IsMatch(namesLine, namePattern))
+                                //    {
+                                //        repeatCFTPattern = @"^\d+\s.*\s\d+\s\d+$";
+                                //    }
+                                //}
+                                //else if (Regex.IsMatch(namesLine, @"^[A-Za-z]+.*\sTEL:\s?(\d{3}[-\s]?\d{3}[-\s]?\d{4}|\d{3}[-\s]?\d{3}|(\d{3}-\d{4}(\/\s?\d{3}-\d{4})?))\s.*\s\d+\s\d+$"))
+                                //{
+                                //    repeatCFTPattern = @"^[A-Za-z]+.*\sTEL:\s?(\d{3}[-\s]?\d{3}[-\s]?\d{4}|\d{3}[-\s]?\d{3}|(\d{3}-\d{4}(\/\s?\d{3}-\d{4})?))\s.*\s\d+\s\d+$";
+                                //}
+                                //else if (Regex.IsMatch(namesLine, @"^[A-Za-z]+.*?(?<!\b\d{3}(?:[-\s]\d{3}[-\s]?\d{0,4}|[-\s]?\d{4}/?\s?\d{0,4}))\s\d+\s\d+$"))
+                                //{
+                                //    repeatCFTPattern = @"^[A-Za-z]+.*?(?<!\b\d{3}(?:[-\s]\d{3}[-\s]?\d{0,4}|[-\s]?\d{4}/?\s?\d{0,4}))\s\d+\s\d+$";
+                                //}
+
+                                var pattern = "";
+                                if (Regex.IsMatch(namesLine, @"^\d{1,2}\s+.*\s+\d{1,2}\s+\d{1,2}$"))
+                                {
+                                    pattern = "pattern1";
+                                    repeatCFTPattern = @"^\d{1,2}\s+.*\s+\d{1,2}\s+\d{1,2}$";
+                                }
+                                else if (Regex.IsMatch(namesLine, @"^.*\s+\d{1,2}\s+.*\s+\d{1,2}\s+\d{1,2}$"))
+                                {
+                                    pattern = "pattern2";
+                                    repeatCFTPattern = @"^.*\s+\d{1,2}\s+.*\s+\d{1,2}\s+\d{1,2}$";
+                                }
+                                else if (Regex.IsMatch(namesLine, @"^.*\s+TEL:\s+\d{1,2}\s+.*\s+\d{1,2}\s+\d{1,2}$"))
+                                {
+                                    pattern = "pattern3";
+                                    repeatCFTPattern = @"^.*\s+TEL:\s+\d{1,2}\s+.*\s+\d{1,2}\s+\d{1,2}$";
+                                }
+                                else if (Regex.IsMatch(namesLine, @"^.*\s+TEL:\s+(?:\d{3}\s\d{3}\s\d{4}|\d{3}\s\d{3}|\d{3}\s\d{4}|\d{3}-\d{4}|593-8523/\s?593-8522)\s+\d{1,2}\s+.*\s+\d{1,2}\s+\d{1,2}$"))
+                                {
+                                    pattern = "pattern4";
+                                    repeatCFTPattern = @"^.*\s+TEL:\s+(?:\d{3}\s\d{3}\s\d{4}|\d{3}\s\d{3}|\d{3}\s\d{4}|\d{3}-\d{4}|593-8523/\s?593-8522)\s+\d{1,2}\s+.*\s+\d{1,2}\s+\d{1,2}$"; // Explicitly mark this as not passing any condition
+                                }
+                                //else
+                                //{
+                                //    pattern = "";
+                                //    repeatCFTPattern = "";
+                                //}
+                                //repeatCFTPattern = @"^(?:(?!TEL:)\D+\s)?(\d+\s[A-Za-z]+\s\d+\s\d+)(?:\s(\d+\s\d+))?$"; ;
+                                int isMatchCount = 0;
+                                int isMatchCFTCount = 0;
+                                bool isMatch = Regex.IsMatch(namesLine, namePattern);
+                                bool isMatchCFT = false;
+                                if (!string.IsNullOrEmpty(repeatCFTPattern))
+                                {
+                                    isMatchCFT = true;
+                                    if(!string.IsNullOrEmpty(blNumber) && !string.IsNullOrEmpty(pattern))
+                                    {
+                                        fields.Add(blNumber);
+                                        fields.Add(consignee);
+                                        fields.Add(shipper);
+                                        fields.Add(pcs);
+                                        fields.Add(cargoType);
+                                        fields.Add(description);
+                                        fields.Add(weightLbs);
+                                        fields.Add(weightKgs);
+                                        fields.Add(volume);
+                                        fields.Add(freightValue);
+
+                                        rows.Add(new List<string>(fields));
+                                        fields.Clear();
+                                        // Reset variables for the next row
+                                        telCount = 0;
+                                        fieldCount++;
+                                        isMatchCount = 0;
+                                        blNumber = ""; consignee = ""; shipper = ""; pcs = "";
+                                        cargoType = ""; description = ""; weightLbs = ""; weightKgs = ""; volume = ""; freightValue = "";
+                                    }
+                                }
+                                //bool isMatchCFT = Regex.IsMatch(namesLine, repeatCFTPattern);
+                                if (isMatch)
+                                {
+                                    isMatchCount++;
+                                    if(isMatchCount > 0 && !string.IsNullOrEmpty(blNumber))
+                                    {
+                                        fields.Add(blNumber);
+                                        fields.Add(consignee);
+                                        fields.Add(shipper);
+                                        fields.Add(pcs);
+                                        fields.Add(cargoType);
+                                        fields.Add(description);
+                                        fields.Add(weightLbs);
+                                        fields.Add(weightKgs);
+                                        fields.Add(volume);
+                                        fields.Add(freightValue);
+
+                                        rows.Add(new List<string>(fields));
+                                        fields.Clear();
+                                        // Reset variables for the next row
+                                        telCount = 0;
+                                        fieldCount++;
+                                        isMatchCount = 0;
+                                        blNumber = ""; consignee = ""; shipper = ""; pcs = "";
+                                        cargoType = ""; description = ""; weightLbs = ""; weightKgs = ""; volume = ""; freightValue = "";
+                                    }
+                                }
+                                else if ((isMatchCFT && namesLine.ToLower().Trim() == "klc   freight   services") || (isMatchCFT && !isMatch))
+                                {
+                                    isMatchCFTCount++;
+                                    if (Regex.IsMatch(namesLine, repeatCFTPattern))
+                                    {
+                                        previousLine = previousLine;
+                                        namesLine = namesLine;
+                                        var previousLineParts = Regex.Split(previousLine, @"\s+");
+                                        var description2 = "";
+
+                                        if (previousLineParts.Length >= 10)
+                                        {
+                                            if (pattern == "pattern1")
+                                            {
+                                                blNumber = $"{previousLineParts[0]}";
+                                                shipper = $"{previousLineParts[1]} {previousLineParts[2]}";
+                                                consignee = $"{previousLineParts[3]} {previousLineParts[4]}";
+                                                pcs = $"{namesLine[0]}";
+                                                description = string.Join(" ", previousLineParts.Skip(1).Take(previousLineParts.Length - 3));
+                                                weightLbs = previousLineParts[previousLineParts.Length - 2]; // Second-to-last value
+                                                weightKgs = previousLineParts[previousLineParts.Length - 2]; // Assuming same as weightLbs for now
+                                                volume = previousLineParts[previousLineParts.Length - 1]; //freightValue = $"{nameParts[5]}";
+                                            }
+                                            else if (pattern == "pattern2")
+                                            {
+                                                blNumber = $"{previousLineParts[0]}";
+                                                shipper = $"{previousLineParts[1]} {previousLineParts[2]}";
+                                                consignee = $"{previousLineParts[3]} {previousLineParts[4]}";
+                                                pcs = $"{namesLine[6]}";
+                                                description = string.Join(" ", previousLineParts.Skip(7).Take(previousLineParts.Length - 9));
+                                                weightLbs = previousLineParts[previousLineParts.Length - 2]; // Second-to-last value
+                                                weightKgs = previousLineParts[previousLineParts.Length - 2]; // Assuming same as weightLbs for now
+                                                volume = previousLineParts[previousLineParts.Length - 1]; //freightValue = $"{nameParts[5]}";
+                                            }
+                                            else if (pattern == "pattern3")
+                                            {
+                                                blNumber = $"{previousLineParts[0]}";
+                                                shipper = $"{previousLineParts[1]} {previousLineParts[2]}";
+                                                consignee = $"{previousLineParts[3]} {previousLineParts[4]}";
+                                                pcs = $"{namesLine[6]}";
+                                                description = string.Join(" ", previousLineParts.Skip(7).Take(previousLineParts.Length - 9));
+                                                weightLbs = previousLineParts[previousLineParts.Length - 2]; // Second-to-last value
+                                                weightKgs = previousLineParts[previousLineParts.Length - 2]; // Assuming same as weightLbs for now
+                                                volume = previousLineParts[previousLineParts.Length - 1]; //freightValue = $"{nameParts[5]}";
+                                            }
+                                            else if (pattern == "pattern4")
+                                            {
+                                                blNumber = $"{previousLineParts[0]}";
+                                                shipper = $"{previousLineParts[1]} {previousLineParts[2]}";
+                                                consignee = $"{previousLineParts[3]} {previousLineParts[4]}";
+                                                pcs = $"{namesLine[6]}";
+                                                description = string.Join(" ", previousLineParts.Skip(7).Take(previousLineParts.Length - 9));
+                                                weightLbs = previousLineParts[previousLineParts.Length - 2]; // Second-to-last value
+                                                weightKgs = previousLineParts[previousLineParts.Length - 2]; // Assuming same as weightLbs for now
+                                                volume = previousLineParts[previousLineParts.Length - 1]; //freightValue = $"{nameParts[5]}";
+                                            }
+                                            else
+                                            {
+                                                blNumber = $"{previousLineParts[0]}";
+                                                shipper = $"{previousLineParts[1]} {previousLineParts[2]}";
+                                                consignee = $"{previousLineParts[3]} {previousLineParts[4]}";
+                                                pcs = $"{namesLine[6]}";
+                                                description = string.Join(" ", previousLineParts.Skip(7).Take(previousLineParts.Length - 9));
+                                                weightLbs = previousLineParts[previousLineParts.Length - 2]; // Second-to-last value
+                                                weightKgs = previousLineParts[previousLineParts.Length - 2]; // Assuming same as weightLbs for now
+                                                volume = previousLineParts[previousLineParts.Length - 1]; //freightValue = $"{nameParts[5]}";
+                                            }
+                                            //blNumber = $"{previousLineParts[0]}";
+                                            //shipper = $"{previousLineParts[1]} {previousLineParts[2]}";
+                                            //consignee = $"{previousLineParts[3]} {previousLineParts[4]}";
+                                            //pcs = $"{namesLine[6]}";
+                                            //description = string.Join(" ", previousLineParts.Skip(7).Take(previousLineParts.Length - 9));
+                                            //weightLbs = previousLineParts[previousLineParts.Length - 2]; // Second-to-last value
+                                            //weightKgs = previousLineParts[previousLineParts.Length - 2]; // Assuming same as weightLbs for now
+                                            //volume = previousLineParts[previousLineParts.Length - 1]; //freightValue = $"{nameParts[5]}";
+                                        }
+                                    }
+                                    if (isMatchCFTCount > 0 && !string.IsNullOrEmpty(blNumber) && !string.IsNullOrEmpty(pattern))
+                                    {
+                                        fields.Add(blNumber);
+                                        fields.Add(consignee);
+                                        fields.Add(shipper);
+                                        fields.Add(pcs);
+                                        fields.Add(cargoType);
+                                        fields.Add(description);
+                                        fields.Add(weightLbs);
+                                        fields.Add(weightKgs);
+                                        fields.Add(volume);
+                                        fields.Add(freightValue);
+
+                                        rows.Add(new List<string>(fields));
+                                        fields.Clear();
+                                        // Reset variables for the next row
+                                        telCount = 0;
+                                        fieldCount++;
+                                        isMatchCount = 0;
+                                        blNumber = ""; consignee = ""; shipper = ""; pcs = "";
+                                        cargoType = ""; description = ""; weightLbs = ""; weightKgs = ""; volume = ""; freightValue = "";
+                                    }
+                                }
+                                else if(!isMatch && namesLine.ToLower().Trim() == "klc   freight   services")
+                                {
+                                    isMatchCount++;
+                                    if(isMatchCount > 0 && !string.IsNullOrEmpty(blNumber) && namesLine.ToLower().Trim() == "klc   freight   services")
+                                    {
+                                        fields.Add(blNumber);
+                                        fields.Add(consignee);
+                                        fields.Add(shipper);
+                                        fields.Add(pcs);
+                                        fields.Add(cargoType);
+                                        fields.Add(description);
+                                        fields.Add(weightLbs);
+                                        fields.Add(weightKgs);
+                                        fields.Add(volume);
+                                        fields.Add(freightValue);
+
+                                        rows.Add(new List<string>(fields));
+                                        fields.Clear();
+                                        // Reset variables for the next row
+                                        telCount = 0;
+                                        fieldCount++;
+                                        isMatchCount = 0;
+                                        blNumber = ""; consignee = ""; shipper = ""; pcs = "";
+                                        cargoType = ""; description = ""; weightLbs = ""; weightKgs = ""; volume = ""; freightValue = "";
+                                    }
+                                }
+                                if (Regex.IsMatch(namesLine, namePattern))
+                                {
+                                    namesLine = lines[i].Trim();
+                                    if (isMatch)
+                                    {
+                                        previousLine = lines[i].Trim();
+                                    }
+                                    var nameParts = Regex.Split(namesLine, @"\s+");
+                                    var description2 = "";
+                                    if (!string.IsNullOrEmpty(blNumber))
+                                    {
+                                        int lastnameParts = nameParts.Count() - 1;
+                                        int lastCommaIndex = 0;
+                                        int commaCount = 0;
+                                        var commaParts = nameParts;
+                                        for (int j = 0; j < commaParts.Length; j++)
+                                        {
+                                            if (commaCount < 1)
+                                            {
+                                                if (commaParts[j].Contains(","))
+                                                {
+                                                    commaCount++;
+                                                    lastCommaIndex = j;
+                                                }
+                                            }
+                                        }
+                                        description2 = string.Join(" ", nameParts.Skip(lastCommaIndex).Take(nameParts.Length - 1));
+                                        description = string.IsNullOrEmpty(description) ? description2 : $"{description}" + " " + $"{description2}";
+                                        description2 = "";
+                                    }
+                                    else
+                                    {
+                                        if (nameParts.Length >= 10)
+                                        {
+                                            blNumber = $"{nameParts[0]}";
+                                            shipper = $"{nameParts[1]} {nameParts[2]}";
+                                            consignee = $"{nameParts[3]} {nameParts[4]}";
+                                            pcs = $"{nameParts[6]}";
+                                            description = string.Join(" ", nameParts.Skip(7).Take(nameParts.Length - 9));
+                                            weightLbs = nameParts[nameParts.Length - 2]; // Second-to-last value
+                                            weightKgs = nameParts[nameParts.Length - 2]; // Assuming same as weightLbs for now
+                                            volume = nameParts[nameParts.Length - 1]; // Last value
+                                            //freightValue = $"{nameParts[5]}";
+                                        }
+                                    }
+                                }
+                                else if (!string.IsNullOrEmpty(description))                                
+                                {
+                                    var nameParts = Regex.Split(namesLine, @"\s+");
+                                    var description2 = "";
+                                    if (!string.IsNullOrEmpty(blNumber))
+                                    {
+                                        int lastnameParts = nameParts.Count() - 1;
+                                        int lastCommaIndex = 0;
+                                        int commaCount = 0;
+                                        var commaParts = nameParts;
+                                        for (int j = 0; j < commaParts.Length; j++)
+                                        {
+                                            if (commaCount < 1)
+                                            {
+                                                if (commaParts[j].Contains(","))
+                                                {
+                                                    commaCount++;
+                                                    lastCommaIndex = j;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        description2 = string.Join(" ", nameParts.Skip(lastCommaIndex).Take(nameParts.Length - 1));
+                                        description = string.IsNullOrEmpty(description) ? description2 : $"{description}" + " " + $"{description2}";
+                                        description2 = "";
+                                    }
+                                }
+                                i++;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        var namesLine = lines[i].Trim();
+                        var previousLine = "";
+                        
+                        namesLine = lines[i].Trim();
+                        //var namePattern = @"^\d+\s[A-Za-z]+(?:\s[A-Za-z]+)*(?:\s[A-Za-z]+\s[A-Za-z]+)?(?:\s[A-Za-z]+\s[A-Za-z]+)?(?:\s(?:[A-Za-z0-9.,]+))*$";
+                        //var namePattern = @"^\d+\s[A-Za-z]+(?:\s[A-Za-z]+)*(?:\s[A-Za-z]+\s[A-Za-z]+)?(?:\s[A-Za-z]+\s[A-Za-z]+)?(?:\s(?:[A-Za-z0-9.,]+))*\s\d+$";
+                        var namePattern = @"^\d+\s[A-Za-z]+(?:[\s-][A-Za-z]+)*(?:\sADDR\s\d+\s(?:[A-Za-z0-9.,]+\s?)+)\s\d+\s\d+$";
+
+                        if (i < lines.Length)
+                        {
+                            while (i < lines.Length)
+                            {
+                                namesLine = lines[i].Trim();
+                                //var repeatCFTPattern = @"^(.*)\s\d+\s\d+$";
+                                //var repeatCFTPattern = @"^(?:(?!TEL:)\D+\s)?(\d+\s[A-Za-z]+\s\d+\s\d+)(?:\s(\d+\s\d+))?$"; ;
+                                var repeatCFTPattern = "";
+
+                                //if (Regex.IsMatch(namesLine, @"^\d+\s.*\s\d+\s\d+$"))
+                                //{
+                                //    if(!Regex.IsMatch(namesLine, namePattern))
+                                //    {
+                                //        repeatCFTPattern = @"^\d+\s.*\s\d+\s\d+$";
+                                //    }
+                                //}
+                                //else if (Regex.IsMatch(namesLine, @"^[A-Za-z]+.*\sTEL:\s?(\d{3}[-\s]?\d{3}[-\s]?\d{4}|\d{3}[-\s]?\d{3}|(\d{3}-\d{4}(\/\s?\d{3}-\d{4})?))\s.*\s\d+\s\d+$"))
+                                //{
+                                //    repeatCFTPattern = @"^[A-Za-z]+.*\sTEL:\s?(\d{3}[-\s]?\d{3}[-\s]?\d{4}|\d{3}[-\s]?\d{3}|(\d{3}-\d{4}(\/\s?\d{3}-\d{4})?))\s.*\s\d+\s\d+$";
+                                //}
+                                //else if (Regex.IsMatch(namesLine, @"^[A-Za-z]+.*?(?<!\b\d{3}(?:[-\s]\d{3}[-\s]?\d{0,4}|[-\s]?\d{4}/?\s?\d{0,4}))\s\d+\s\d+$"))
+                                //{
+                                //    repeatCFTPattern = @"^[A-Za-z]+.*?(?<!\b\d{3}(?:[-\s]\d{3}[-\s]?\d{0,4}|[-\s]?\d{4}/?\s?\d{0,4}))\s\d+\s\d+$";
+                                //}
+                                var pattern = "";
+                                if (Regex.IsMatch(namesLine, @"^\d{1,2}\s+.*\s+\d{1,2}\s+\d{1,2}$"))
+                                {
+                                    pattern = "pattern1";
+                                    repeatCFTPattern = @"^\d{1,2}\s+.*\s+\d{1,2}\s+\d{1,2}$";
+                                }
+                                else if (Regex.IsMatch(namesLine, @"^.*\s+\d{1,2}\s+.*\s+\d{1,2}\s+\d{1,2}$"))
+                                {
+                                    pattern = "pattern2";
+                                    repeatCFTPattern = @"^.*\s+\d{1,2}\s+.*\s+\d{1,2}\s+\d{1,2}$";
+                                }
+                                else if (Regex.IsMatch(namesLine, @"^.*\s+TEL:\s+\d{1,2}\s+.*\s+\d{1,2}\s+\d{1,2}$"))
+                                {
+                                    pattern = "pattern3";
+                                    repeatCFTPattern = @"^.*\s+TEL:\s+\d{1,2}\s+.*\s+\d{1,2}\s+\d{1,2}$";
+                                }
+                                else if (Regex.IsMatch(namesLine, @"^.*\s+TEL:\s+(?:\d{3}\s\d{3}\s\d{4}|\d{3}\s\d{3}|\d{3}\s\d{4}|\d{3}-\d{4}|593-8523/\s?593-8522)\s+\d{1,2}\s+.*\s+\d{1,2}\s+\d{1,2}$"))
+                                {
+                                    pattern = "pattern4";
+                                    repeatCFTPattern = @"^.*\s+TEL:\s+(?:\d{3}\s\d{3}\s\d{4}|\d{3}\s\d{3}|\d{3}\s\d{4}|\d{3}-\d{4}|593-8523/\s?593-8522)\s+\d{1,2}\s+.*\s+\d{1,2}\s+\d{1,2}$"; // Explicitly mark this as not passing any condition
+                                }
+                                //else
+                                //{
+                                //    pattern = "";
+                                //    repeatCFTPattern = "";
+                                //}
+                                int isMatchCount = 0;
+                                int isMatchCFTCount = 0;
+                                bool isMatch = Regex.IsMatch(namesLine, namePattern);
+                                bool isMatchCFT = false;
+                                if (!string.IsNullOrEmpty(repeatCFTPattern))
+                                {
+                                    isMatchCFT = true;
+                                    if(!string.IsNullOrEmpty(blNumber) && !string.IsNullOrEmpty(pattern))
+                                    {
+                                        fields.Add(blNumber);
+                                        fields.Add(consignee);
+                                        fields.Add(shipper);
+                                        fields.Add(pcs);
+                                        fields.Add(cargoType);
+                                        fields.Add(description);
+                                        fields.Add(weightLbs);
+                                        fields.Add(weightKgs);
+                                        fields.Add(volume);
+                                        fields.Add(freightValue);
+
+                                        rows.Add(new List<string>(fields));
+                                        fields.Clear();
+                                        // Reset variables for the next row
+                                        telCount = 0;
+                                        fieldCount++;
+                                        isMatchCount = 0;
+                                        blNumber = ""; consignee = ""; shipper = ""; pcs = "";
+                                        cargoType = ""; description = ""; weightLbs = ""; weightKgs = ""; volume = ""; freightValue = "";
+                                    }
+                                }
+                                //bool isMatchCFT = Regex.IsMatch(namesLine, repeatCFTPattern);
+                                if (isMatch)
+                                {
+                                    isMatchCount++;
+                                    if (isMatchCount > 0 && !string.IsNullOrEmpty(blNumber))
+                                    {
+                                        fields.Add(blNumber);
+                                        fields.Add(consignee);
+                                        fields.Add(shipper);
+                                        fields.Add(pcs);
+                                        fields.Add(cargoType);
+                                        fields.Add(description);
+                                        fields.Add(weightLbs);
+                                        fields.Add(weightKgs);
+                                        fields.Add(volume);
+                                        fields.Add(freightValue);
+
+                                        rows.Add(new List<string>(fields));
+                                        fields.Clear();
+                                        // Reset variables for the next row
+                                        telCount = 0;
+                                        fieldCount++;
+                                        isMatchCount = 0;
+                                        blNumber = ""; consignee = ""; shipper = ""; pcs = "";
+                                        cargoType = ""; description = ""; weightLbs = ""; weightKgs = ""; volume = ""; freightValue = "";
+                                    }
+                                }
+                                else if ((isMatchCFT && namesLine.ToLower().Trim() == "klc   freight   services") || (isMatchCFT && !isMatch))
+                                {
+
+                                    isMatchCFTCount++;
+                                    if (Regex.IsMatch(namesLine, repeatCFTPattern))
+                                    {
+                                        previousLine = previousLine;
+                                        namesLine = namesLine;
+                                        var previousLineParts = Regex.Split(previousLine, @"\s+");
+                                        var namesLineParts = Regex.Split(namesLine, @"\s+");
+                                        var description2 = "";
+
+                                        if (previousLineParts.Length >= 10)
+                                        {
+                                            if (pattern == "pattern1")
+                                            {
+                                                blNumber = $"{previousLineParts[0]}";
+                                                shipper = $"{previousLineParts[1]} {previousLineParts[2]}";
+                                                consignee = $"{previousLineParts[3]} {previousLineParts[4]}";
+                                                pcs = $"{namesLineParts[0]}";
+                                                description = string.Join(" ", namesLineParts.Skip(1).Take(namesLineParts.Length - 3));
+                                                weightLbs = namesLineParts[namesLineParts.Length - 2]; // Second-to-last value
+                                                weightKgs = namesLineParts[namesLineParts.Length - 2]; // Assuming same as weightLbs for now
+                                                volume = namesLineParts[namesLineParts.Length - 1]; //freightValue = $"{nameParts[5]}";
+                                            }
+                                            else if (pattern == "pattern2")
+                                            {
+                                                blNumber = $"{previousLineParts[0]}";
+                                                shipper = $"{previousLineParts[1]} {previousLineParts[2]}";
+                                                consignee = $"{previousLineParts[3]} {previousLineParts[4]}";
+                                                pcs = $"{namesLineParts[2]}";
+                                                description = string.Join(" ", namesLineParts.Skip(3).Take(namesLineParts.Length - 5));
+                                                weightLbs = namesLineParts[namesLineParts.Length - 2]; // Second-to-last value
+                                                weightKgs = namesLineParts[namesLineParts.Length - 2]; // Assuming same as weightLbs for now
+                                                volume = namesLineParts[namesLineParts.Length - 1]; //freightValue = $"{nameParts[5]}";
+                                            }
+                                            else if (pattern == "pattern3")
+                                            {
+                                                blNumber = $"{previousLineParts[0]}";
+                                                shipper = $"{previousLineParts[1]} {previousLineParts[2]}";
+                                                consignee = $"{previousLineParts[3]} {previousLineParts[4]}";
+                                                pcs = $"{namesLineParts[6]}";
+                                                description = string.Join(" ", namesLine.Skip(7).Take(namesLine.Length - 9));
+                                                weightLbs = namesLineParts[namesLineParts.Length - 2]; // Second-to-last value
+                                                weightKgs = namesLineParts[namesLineParts.Length - 2]; // Assuming same as weightLbs for now
+                                                volume = namesLineParts[namesLineParts.Length - 1]; //freightValue = $"{nameParts[5]}";
+                                            }
+                                            else if (pattern == "pattern4")
+                                            {
+                                                blNumber = $"{previousLineParts[0]}";
+                                                shipper = $"{previousLineParts[1]} {previousLineParts[2]}";
+                                                consignee = $"{previousLineParts[3]} {previousLineParts[4]}";
+                                                pcs = $"{namesLineParts[6]}";
+                                                description = string.Join(" ", namesLine.Skip(7).Take(namesLine.Length - 9));
+                                                weightLbs = namesLineParts[namesLineParts.Length - 2]; // Second-to-last value
+                                                weightKgs = namesLineParts[namesLineParts.Length - 2]; // Assuming same as weightLbs for now
+                                                volume = namesLineParts[namesLineParts.Length - 1]; //freightValue = $"{nameParts[5]}";
+                                            }
+                                            else
+                                            {
+                                                blNumber = $"{previousLineParts[0]}";
+                                                shipper = $"{previousLineParts[1]} {previousLineParts[2]}";
+                                                consignee = $"{previousLineParts[3]} {previousLineParts[4]}";
+                                                pcs = $"{namesLineParts[6]}";
+                                                description = string.Join(" ", namesLine.Skip(7).Take(namesLine.Length - 9));
+                                                weightLbs = namesLineParts[namesLineParts.Length - 2]; // Second-to-last value
+                                                weightKgs = namesLineParts[namesLineParts.Length - 2]; // Assuming same as weightLbs for now
+                                                volume = namesLineParts[namesLineParts.Length - 1]; //freightValue = $"{nameParts[5]}";
+                                            }
+
+                                        }
+                                    }
+                                    if (isMatchCFTCount > 0 && !string.IsNullOrEmpty(blNumber))
+                                    {
+                                        fields.Add(blNumber);
+                                        fields.Add(consignee);
+                                        fields.Add(shipper);
+                                        fields.Add(pcs);
+                                        fields.Add(cargoType);
+                                        fields.Add(description);
+                                        fields.Add(weightLbs);
+                                        fields.Add(weightKgs);
+                                        fields.Add(volume);
+                                        fields.Add(freightValue);
+
+                                        rows.Add(new List<string>(fields));
+                                        fields.Clear();
+                                        // Reset variables for the next row
+                                        telCount = 0;
+                                        fieldCount++;
+                                        isMatchCount = 0;
+                                        isMatchCFTCount = 0;
+                                        blNumber = ""; consignee = ""; shipper = ""; pcs = "";
+                                        cargoType = ""; description = ""; weightLbs = ""; weightKgs = ""; volume = ""; freightValue = "";
+                                    }
+                                }
+                                else if (!isMatch && namesLine.ToLower().Trim() == "klc   freight   services")
+                                {
+                                    isMatchCount++;
+                                    if (isMatchCount > 0 && !string.IsNullOrEmpty(blNumber) && namesLine.ToLower().Trim() == "klc   freight   services")
+                                    {
+                                        fields.Add(blNumber);
+                                        fields.Add(consignee);
+                                        fields.Add(shipper);
+                                        fields.Add(pcs);
+                                        fields.Add(cargoType);
+                                        fields.Add(description);
+                                        fields.Add(weightLbs);
+                                        fields.Add(weightKgs);
+                                        fields.Add(volume);
+                                        fields.Add(freightValue);
+
+                                        rows.Add(new List<string>(fields));
+                                        fields.Clear();
+                                        // Reset variables for the next row
+                                        telCount = 0;
+                                        fieldCount++;
+                                        isMatchCount = 0;
+                                        blNumber = ""; consignee = ""; shipper = ""; pcs = "";
+                                        cargoType = ""; description = ""; weightLbs = ""; weightKgs = ""; volume = ""; freightValue = "";
+                                    }
+                                }
+                                if (Regex.IsMatch(namesLine, namePattern))
+                                {
+                                    namesLine = lines[i].Trim();
+                                    if (isMatch)
+                                    {
+                                        previousLine = lines[i].Trim();
+                                    }
+                                    var nameParts = Regex.Split(namesLine, @"\s+");
+                                    var description2 = "";
+                                    if (!string.IsNullOrEmpty(blNumber))
+                                    {
+                                        int lastnameParts = nameParts.Count() - 1;
+                                        int lastCommaIndex = 0;
+                                        int commaCount = 0;
+                                        var commaParts = nameParts;
+                                        for (int j = 0; j < commaParts.Length; j++)
+                                        {
+                                            if (commaCount < 1)
+                                            {
+                                                if (commaParts[j].Contains(","))
+                                                {
+                                                    commaCount++;
+                                                    lastCommaIndex = j;
+                                                }
+                                            }
+                                        }
+                                        description2 = string.Join(" ", nameParts.Skip(lastCommaIndex).Take(nameParts.Length - 1));
+                                        description = string.IsNullOrEmpty(description) ? description2 : $"{description}" + " " + $"{description2}";
+                                        description2 = "";
+                                    }
+                                    else
+                                    {
+                                        if (nameParts.Length >= 10)
+                                        {
+                                            blNumber = $"{nameParts[0]}";
+                                            shipper = $"{nameParts[1]} {nameParts[2]}";
+                                            consignee = $"{nameParts[3]} {nameParts[4]}";
+                                            pcs = $"{nameParts[6]}";
+                                            description = string.Join(" ", nameParts.Skip(7).Take(nameParts.Length - 9));
+                                            weightLbs = nameParts[nameParts.Length - 2]; // Second-to-last value
+                                            weightKgs = nameParts[nameParts.Length - 2]; // Assuming same as weightLbs for now
+                                            volume = nameParts[nameParts.Length - 1]; // Last value
+                                        }
+                                    }
+                                }
+                                else if (!string.IsNullOrEmpty(description))
+                                {
+                                    var nameParts = Regex.Split(namesLine, @"\s+");
+                                    var description2 = "";
+                                    if (!string.IsNullOrEmpty(blNumber))
+                                    {
+                                        int lastnameParts = nameParts.Count() - 1;
+                                        int lastCommaIndex = 0;
+                                        int commaCount = 0;
+                                        var commaParts = nameParts;
+                                        for (int j = 0; j < commaParts.Length; j++)
+                                        {
+                                            if (commaCount < 1)
+                                            {
+                                                if (commaParts[j].Contains(","))
+                                                {
+                                                    commaCount++;
+                                                    lastCommaIndex = j;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        description2 = string.Join(" ", nameParts.Skip(lastCommaIndex).Take(nameParts.Length - 1));
+                                        description = string.IsNullOrEmpty(description) ? description2 : $"{description}" + " " + $"{description2}";
+                                        description2 = "";
+                                    }
+                                }
+                                i++;
+                            }
+                        }
+                    }
+                }
+            }
+
+            return rows;
+        }
+        private List<List<string>> ExtractFieldsForLaparkan(string text, int pageNo)
+        {
+            List<List<string>> rows = new List<List<string>>();
+            List<string> fields = new List<string>();
+
+            string blNumber = "", consignee = "", shipper = "", pcs = "";
+            string cargoType = "", description = "", weightLbs = "";
+            string weightKgs = "", volume = "", freightValue = "";
+            int telCount = 0;
+
+            // Split the input text into lines
+            string[] lines = text.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+
+            for (int i = 0; i < lines.Length; i++)
+            {
+                var line = lines[i];
+
+                if (pageNo >= 1 && fieldCount >= 0)
+                {
+                    // Skip unnecessary lines and extract key data
+                    if (blNumber == "" && line.ToLower().Contains("HBLNO:"))
+                    {
+                        var namesLine = lines[i].Trim();
+                        var previousLine = "";
+                        //while (namesLine.ToLower().Contains("wt cft"))
+                        //{
+                        //    i++;
+                        //    namesLine = lines[i].Trim();
+                        //}
+                        if (blNumber == "" && line.ToLower().Contains("HBLNO:"))
+                        {
+                            fields.Add(blNumber);
+                            fields.Add(consignee);
+                            fields.Add(shipper);
+                            fields.Add(pcs);
+                            fields.Add(cargoType);
+                            fields.Add(description);
+                            fields.Add(weightLbs);
+                            fields.Add(weightKgs);
+                            fields.Add(volume);
+                            fields.Add(freightValue);
+
+                            rows.Add(new List<string>(fields));
+                            fields.Clear();
+                            // Reset variables for the next row
+                            telCount = 0;
+                            blNumber = ""; consignee = ""; shipper = ""; pcs = "";
+                            cargoType = ""; description = ""; weightLbs = ""; weightKgs = ""; volume = ""; freightValue = "";
+                        }
+
+                        namesLine = lines[i];
+
+                        var nameParts = Regex.Split(namesLine, @"\s+");
+                        blNumber = $"{nameParts[1]}";
+                        if (string.IsNullOrEmpty(blNumber))
+                        {
+                            if (i < lines.Length)
+                            {
+                                while (i < lines.Length)
+                                {
+                                    var namesNewLine = lines[i];
+
+                                    var nameNewParts = Regex.Split(namesNewLine, @"\s+");
+                                    if (namesNewLine.Contains("PIECES:"))
+                                    {
+                                        if (nameNewParts.Length >= 6)
+                                        {
+                                            shipper = $"{nameNewParts[1]} {nameNewParts[2]}";
+                                            consignee = $"{nameNewParts[3]} {nameNewParts[4]}";
+                                            pcs = $"{namesLine[6]}";
+                                        }
+                                    }
+                                    else if (namesNewLine.Contains("WEIGHT:"))
+                                    {
+                                        for (int j = 0; j < nameNewParts.Length; j++)
+                                        {
+                                            if (nameNewParts[j].Contains("WEIGHT:"))
+                                            {
+                                                j++;
+                                                var weightValue = nameNewParts[j];
+                                                weightKgs = weightValue;
+                                                weightLbs = weightValue;
+                                                break;
+                                            }
+                                            j++;
+                                        }
+                                    }
+                                    else if (namesNewLine.Contains("CUBE:"))
+                                    {
+                                        for (int j = 0; j < nameNewParts.Length; j++)
+                                        {
+                                            if (nameNewParts[j].Contains("CUBE:"))
+                                            {
+                                                j++;
+                                                var volumeValue = nameNewParts[j];
+                                                volume = volumeValue;
+                                                break;
+                                            }
+                                            j++;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        for (int j = 0; j < nameNewParts.Length; j++)
+                                        {
+                                            
+                                            if (!nameNewParts[j].Contains("FREIGHT"))
+                                            {
+                                                if (string.IsNullOrEmpty(description) && !string.IsNullOrEmpty(blNumber))
+                                                {
+                                                    description = string.Join(" ", namesNewLine.Skip(2).Take(namesLine.Length));
+                                                }
+                                                else
+                                                {
+                                                    var cargoDescriptionLine = lines[i].Trim();
+                                                    if (cargoDescriptionLine.Contains("FREIGHT")) break;
+                                                    if (!string.IsNullOrEmpty(description)) description += ", ";
+                                                    description += cargoDescriptionLine;
+                                                }
+                                            }
+                                            j++;
+                                        }
+                                    }
+                                    i++;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            return rows;
+        }
+        private string ExtractField(string text, string pattern)
+        {
+            Regex regex = new Regex(pattern, RegexOptions.IgnoreCase);
+            Match match = regex.Match(text);
+            return match.Success ? match.Groups[1].Value : "";
+        }
+        private void DisplayExtractedData(List<List<string>> extractedData)
+        {
+            List<string> fields = new List<string>();
+            int srNo = 1;  // Start Sr.No from 1
+            foreach (var row in extractedData)
+            {
+                if (row.Count == 10)  // Ensure each row has 10 columns
+                {
+                    // Create a new list for the row, starting with the Sr.No
+                    var newRow = new List<string> { srNo.ToString() };  // Add Sr.No
+
+                    // Add the rest of the row from extractedData (the other 10 columns)
+                    newRow.AddRange(row);
+
+                    // Add the row to the DataGridView
+                    dataGridView1.Rows.Add(newRow.ToArray());
+                    // Increment Sr.No for the next row
+                    srNo++;
+                }
+            }
+        }
+        private void button2_Click(object sender, EventArgs e)
+        {
+            dataGridView1.Rows.Clear();
+            UploadFileName.Text = "";
+            fieldCount = 0;
+        }
+        private void Form1_Load(object sender, EventArgs e)
+        {
+            dataGridView1.ColumnCount = 11;
+            dataGridView1.Columns[0].Name = "Sr.No";
+            dataGridView1.Columns[1].Name = "BL No";
+            dataGridView1.Columns[2].Name = "Shipper";
+            dataGridView1.Columns[3].Name = "Consignee";
+            dataGridView1.Columns[4].Name = "No. Pcs";
+            dataGridView1.Columns[5].Name = "Cargo Type";
+            dataGridView1.Columns[6].Name = "Description";
+            dataGridView1.Columns[7].Name = "Weight Lbs";
+            dataGridView1.Columns[8].Name = "Weight Kgs";
+            dataGridView1.Columns[9].Name = "Volume";
+            dataGridView1.Columns[10].Name = "Freight Value";
+
+            // Apply styling to header cells
+            dataGridView1.EnableHeadersVisualStyles = false; // Disable default header style
+            dataGridView1.ColumnHeadersDefaultCellStyle.BackColor = Color.LightSlateGray;
+            dataGridView1.ColumnHeadersDefaultCellStyle.ForeColor = Color.White;
+            dataGridView1.ColumnHeadersDefaultCellStyle.Font = new Font("Arial", 12, FontStyle.Bold);
+            dataGridView1.ColumnHeadersDefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter;
+
+            // Apply styling to rows
+            dataGridView1.DefaultCellStyle.BackColor = Color.LightCyan;
+            dataGridView1.DefaultCellStyle.ForeColor = Color.Black;
+            dataGridView1.DefaultCellStyle.Font = new Font("Arial", 10, FontStyle.Regular);
+
+            // Set alternating row colors
+            dataGridView1.AlternatingRowsDefaultCellStyle.BackColor = Color.LightGray;
+
+            // Set the grid lines color
+            dataGridView1.GridColor = Color.Gray;
+
+            // Apply column width for better readability
+            dataGridView1.Columns[0].Width = 100;  // BL No
+            dataGridView1.Columns[1].Width = 150;  // Shipper
+            dataGridView1.Columns[2].Width = 150;  // Consignee
+            dataGridView1.Columns[3].Width = 80;   // No. Pcs
+            dataGridView1.Columns[4].Width = 120;  // Cargo Type
+            dataGridView1.Columns[5].Width = 200;  // Description
+            dataGridView1.Columns[6].Width = 120;  // Weight Lbs
+            dataGridView1.Columns[7].Width = 120;  // Weight Kgs
+            dataGridView1.Columns[8].Width = 120;  // Volume
+            dataGridView1.Columns[9].Width = 150;  // Freight Value
+
+            // Apply row height for better appearance
+            dataGridView1.RowTemplate.Height = 30;
+
+            // Optional: Allow user to resize columns manually
+            dataGridView1.AutoResizeColumns(DataGridViewAutoSizeColumnsMode.AllCells);
+        }
+
+        private void button3_Click(object sender, EventArgs e)
+        {
+            // Create a SaveFileDialog to specify the location and filename
+            SaveFileDialog saveFileDialog = new SaveFileDialog();
+            saveFileDialog.Filter = "Excel Files (*.xlsx)|*.xlsx";  // Filter to save only .xlsx files
+            saveFileDialog.Title = "Save DataGridView to Excel";
+
+            if (saveFileDialog.ShowDialog() == DialogResult.OK)
+            {
+                // Create a new Excel workbook and worksheet
+                using (var workbook = new XLWorkbook())
+                {
+                    var worksheet = workbook.Worksheets.Add("Sheet1");
+
+                    // Write column headers
+                    for (int i = 0; i < dataGridView1.ColumnCount; i++)
+                    {
+                        worksheet.Cell(1, i + 1).Value = dataGridView1.Columns[i].HeaderText;
+                    }
+
+                    // Write the data from the DataGridView rows to the worksheet
+                    for (int rowIndex = 0; rowIndex < dataGridView1.Rows.Count; rowIndex++)
+                    {
+                        var row = dataGridView1.Rows[rowIndex];
+
+                        // Skip the last row if it's empty (because DataGridView adds a new row by default)
+                        if (row.IsNewRow) continue;
+
+                        for (int colIndex = 0; colIndex < dataGridView1.ColumnCount; colIndex++)
+                        {
+                            worksheet.Cell(rowIndex + 2, colIndex + 1).Value = row.Cells[colIndex].Value.ToString();
+                        }
+                    }
+
+                    // Save the Excel file to the location selected by the user
+                    workbook.SaveAs(saveFileDialog.FileName);
+                }
+
+                // Notify the user that the file has been saved
+                MessageBox.Show("File saved successfully.", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+        }
+    }
+}
